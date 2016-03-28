@@ -1,0 +1,289 @@
+---
+title: "**Predicting weight lifting quality**"
+author: "Shamik Mitra"
+date: "March 27, 2016"
+output:
+  html_document:
+    highlight: espresso
+    theme: cosmo
+---
+Human Activity Recognition has gained importance thanks to the vast number of affordable data collection devices, like Jawbone Up, Nike FuelBand, Fitbit and even smart phones. Using accelerometers and gyroscopes embedded within these devices, it is possible to gather a large amount of data, which can then be analyzed to identify patterns. Most of the data analyses has focused on identifying the activity. Velloso, et.al.^[1]^ have used data to identify the quality of the activity. Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+
+This paper uses a subset of the data available through the Coursera course website^[2]^ to build a model to predict the Class, thereby predicting the quality of the activity, by using the data from sensors. The analysis tries multiple methods for analysis and compares them using cross-validation techniques. It then uses the best alternative to create the final model to be used for prediction.
+
+#<font color="darkorchid">Data loading and pre-processing</font>
+
+```{r data_load, message=FALSE, warning=FALSE, echo=TRUE, cache=TRUE}
+## load the required libraries and set the seed
+library(caret)
+library(gplots)
+set.seed(1)
+## Read data
+pmltraining <- read.csv("pml-training.csv", na.strings = c("NA","#DIV/0!"))
+```
+
+A quick inspection of the data shows that the data consists of measurements in sets. Every set of data is followed by a row that contains the summary information about the data. A number of the summary columns are filled in only for these summary rows. As part of preprocessing the data, the summary rows are removed and the columns of the table that are only filled in for the summary rows are deleted.
+
+```{r pre_process, message=FALSE, warning=FALSE, echo=TRUE, cache=TRUE}
+## Remove summary rows
+pmltraining <- pmltraining[pmltraining$new_window!="yes",]
+## Count the number of non NA rows in each column. If it is 0, then add it to a list of columns to be dropped
+DropCols <- list()
+for(RowCounter in 1:ncol(pmltraining)) if(length(which(!is.na(pmltraining[,RowCounter])))==0) {
+    DropCols <- c(DropCols,names(pmltraining)[RowCounter])
+}
+## Create a subset of data dropping all the columns that have no data
+pmltraining <- pmltraining[,!(names(pmltraining) %in% DropCols)]
+```
+
+Looking at the variation of the data for the various _classe_ variables shows that it is indeed possible to identify some patterns in the data that would lead us to identify the _classe_. There are 4 charts below. The first chart shows the distribution of the _pitch_forearm_ variable for each of the _classe_ values. As it can be seen, the values associated with **classe A** show a different distribution than the rest. The second figure shows the variation of the *magnet_dumbbell_x* for each of the _classe_ values and it shows a different distribution of **classe A** and **C** compared to the rest. The fourth chart shows a different variation for **classe E** for the _magnet_belt_y_ variable. The third chart shows a lower variation for **classe D** for the _accel_forearm_x_ variation. Note that not all classes need to be identified. Identifying 4 of them will help to identify the 5^th^ by elimination.
+
+```{r initial_charts, message=FALSE, warning=FALSE, echo=TRUE, cache=TRUE}
+plot(pmltraining$classe,pmltraining$pitch_forearm, ylab="pitch_forearm",main="1. pitch_forearm separates A from the rest", cex=0.7, col="darkorchid2")
+plot(pmltraining$classe,pmltraining$magnet_dumbbell_x, ylab="magnet_dumbbell_x",main="2. magnet_dumbbell_x separates A and C from the rest", cex=0.7, col="darkorchid2")
+plot(pmltraining$classe,pmltraining$accel_forearm_x, ylab="accel_forearm_x",main="3. accel_forearm_x separates D from the rest", cex=0.7, col="darkorchid2")
+plot(pmltraining$classe,pmltraining$magnet_belt_y, ylab="magnet_belt_y",main="4. magnet_belt_y separates E from the rest", cex=0.7, col="darkorchid2") 
+```
+
+#<font color="darkorchid">Building a classification model</font>
+As can see above, just a visual inspection shows some kind of classification for each of the 5 _classe_ values. To better analyze this variation, more advanced statistical methods can be used. To do this analysis, a generic function is developed that can perform any kind of training using the _caret_ package's train function. The function takes the following arguments.
+
+- **ModelData**: The input data on which the analysis needs to be done
+- **ModelType**: The type of model to be used
+- **TrainingDataRatio**: The ratio of data to be used for training. If it is 1, then 100% of the data is used for training and the function returns the fitted model. If it is less than 1 then the function is run for cross validation and it returns the accuracy of the model.
+- **NumOfRuns**: The number of times the model should be run. It is useful when the model is being run when the Training Data Ratio is less than 1 for cross validation.
+
+Note that the data is a time series, where typically a K-fold cross validation would be useful. However, the data is clustered together by the _num_window_ column. So the function uses a variation of the random subsampling method where instead of taking completely random samples, the function takes a random sample of the _num_window_ column and then takes all the observations for that _num_window_.
+
+```{r train_function, message=FALSE, warning=FALSE, echo=TRUE, cache=TRUE}
+FitModel <- function(ModelData, ModelType, TrainingDataRatio, NumOfRuns=1, ...) {
+    AccuracyNumerator <- 0
+    for(RunCounter in 1:NumOfRuns) {
+        uniqueNumWindow <- unique(ModelData$num_window)
+        TrainingNums <- createDataPartition(y=uniqueNumWindow,p=TrainingDataRatio, list=FALSE)
+        TrainingData <- ModelData[ModelData$num_window %in% TrainingNums,]
+        TrainingData <- TrainingData[-c(1:7)]
+        ModelFit <- train(classe~., method=ModelType, data=TrainingData, ...)
+        if(TrainingDataRatio < 1) {
+            TestingData <- ModelData[!ModelData$num_window %in% TrainingNums,]
+            TestingData <- TestingData[-c(1:7)]
+            PredictedValues <- predict(ModelFit, newdata = TestingData)
+            ConfMatrix <- table(PredictedValues, TestingData$classe)
+            diag(ConfMatrix) <- 0
+            AccuracyNumerator <- AccuracyNumerator + 1 - (sum(ConfMatrix)/nrow(TestingData))
+        }
+    }
+    if(TrainingDataRatio < 1){
+        AccuracyNumerator / NumOfRuns
+    } else {
+        ModelFit
+    }
+} 
+```
+
+The function above is used to execute the code for multiple types of methods. Each time, it performs the subsampling with 75% of the data used for training and 25% for validation, and runs it 5 times. The table below the code shows the out-of-sample accuracy (**1 - out-of-sample error rate**) of each of the model as well as the time it takes to run the model.
+
+_Note: The Gradient Boosting (gbm) method is run only once instead of the 5 runs. This is due to computer hardware restrictions. The model gave a system memory error when run more than once,_
+
+The times shown in the table below are for comparison purposes. They obviously depend on the hardware used. This report was generation on Microsoft Surface Pro 3, 4-core Intel i5 CPU with 64-bit Windows 10 Pro OS and 8GB RAM.
+
+```{r test_rpart, message=FALSE, warning=FALSE, echo=TRUE, cache=TRUE, results="hide"}
+## cross validate using rpart
+start.time <- Sys.time()
+Accuracy <- FitModel(pmltraining, "rpart", 0.75, NumOfRuns=5)
+rpartAccuracy <- paste(round(Accuracy*100,0),"%",sep = "")
+end.time <- Sys.time()
+Duration <- (end.time - start.time)/5
+rpartDuration <- paste(round(Duration,1),units(Duration))
+```
+
+```{r test_rf, message=FALSE, warning=FALSE, echo=TRUE, cache=TRUE, results="hide"}
+## cross validate using rf
+start.time <- Sys.time()
+rfAccuracy <- FitModel(pmltraining, "rf", 0.75, NumOfRuns=5)
+rfAccuracy <- paste(round(rfAccuracy*100,0),"%",sep = "")
+end.time <- Sys.time()
+Duration <- (end.time - start.time)/5
+rfDuration <- paste(round(Duration,1),units(Duration))
+```
+
+```{r test_treebag, message=FALSE, warning=FALSE, echo=TRUE, cache=TRUE, results="hide"}
+## cross validate using treebag
+start.time <- Sys.time()
+treebagAccuracy <- FitModel(pmltraining, "treebag", 0.75, NumOfRuns=5)
+treebagAccuracy <- paste(round(treebagAccuracy*100,0),"%",sep = "")
+end.time <- Sys.time()
+Duration <- (end.time - start.time)/5
+treebagDuration <- paste(round(Duration,1),units(Duration))
+```
+
+```{r test_gbm, message=FALSE, warning=FALSE, echo=TRUE, cache=TRUE, results="hide"}
+## cross validate using gbm
+start.time <- Sys.time()
+gbmAccuracy <- FitModel(pmltraining, "gbm", 0.75, NumOfRuns=1, verbose=FALSE)
+gbmAccuracy <- paste(round(gbmAccuracy*100,0),"%",sep = "")
+end.time <- Sys.time()
+Duration <- (end.time - start.time)/1
+gbmDuration <- paste(round(Duration,1),units(Duration))
+```
+
+```{r test_lda, message=FALSE, warning=FALSE, echo=TRUE, cache=TRUE, results="hide"}
+## cross validate using lda
+start.time <- Sys.time()
+ldaAccuracy <- FitModel(pmltraining, "lda", 0.75, NumOfRuns=5)
+ldaAccuracy <- paste(round(ldaAccuracy*100,0),"%",sep = "")
+end.time <- Sys.time()
+Duration <- (end.time - start.time)/5
+ldaDuration <- paste(round(Duration,1),units(Duration))
+```
+
+```{r test_nb, message=FALSE, warning=FALSE, echo=TRUE, cache=TRUE, results="hide"}
+## cross validate using nb
+start.time <- Sys.time()
+nbAccuracy <- FitModel(pmltraining, "nb", 0.75, NumOfRuns=5)
+nbAccuracy <- paste(round(nbAccuracy*100,0),"%",sep = "")
+end.time <- Sys.time()
+Duration <- (end.time - start.time)/5
+nbDuration <- paste(round(Duration,1),units(Duration))
+```
+
+**Comparison of models**
+
+Model | Accuracy | Duration
+------|----------|---------------------
+Basic Tree (rpart) | `r rpartAccuracy` | `r rpartDuration`
+Random Forrest (rf) | `r rfAccuracy` | `r rfDuration`
+Bagged Tree (treebag) | `r treebagAccuracy` | `r treebagDuration`
+Stochastic Gradient Boosting (gbm) | `r gbmAccuracy` | `r gbmDuration`
+Linear Discriminate Analysis (lda) | `r ldaAccuracy` | `r ldaDuration`
+Naive Bayes (nb) | `r nbAccuracy` | `r nbDuration`
+
+#<font color="darkorchid">Final model</font>
+
+As shown above the Random Forest method has the highest accuracy, even though it takes the longest time. To build the final model we run the same function, but this time with 100% of the training data. As the last step of the analysis, this model is then used to predict the values of the test set of the data. The output is not shown here, but instead saved in a file.
+
+```{r final_model, message=FALSE, warning=FALSE, echo=TRUE, cache=TRUE}
+##Fit the final model with the complete training data
+FinalModel <- FitModel(pmltraining, "rf", 1, NumOfRuns=1)
+
+##Read the validation data and drop the columns not required
+pmlvalidation <- read.csv("pml-testing.csv", na.strings = c("NA","#DIV/0!"))
+pmlvalidation <- pmlvalidation[ , !(names(pmlvalidation) %in% DropCols)]
+
+##Predict the values of the classe variable using the fitted model and store it in a file
+pmlvalidation$classe <- predict(FinalModel, newdata = pmlvalidation)
+write.csv(pmlvalidation,"model-output.csv")
+```
+
+The table below shows the normalized confusion matrix of the model. As we expected because of the high accuracy above, it does a good job of correctly classifying most of the data. Please refer to the Appendix for the detailed analysis for each of the other models.
+
+```{r final_conf_matrix, message=FALSE, warning=FALSE, echo=TRUE, cache=TRUE}
+##Predict using the pmltraining data
+PredictedValues <- predict(FinalModel, newdata = pmltraining)
+ConfMatrix <- table(PredictedValues, pmltraining$classe)
+
+##Normalize the confusion matrix
+for (i in 1:5) {
+    colsum <- sum(ConfMatrix[,i])
+    for (j in 1:5) ConfMatrix[j,i] <- round(ConfMatrix[j,i]/colsum,2)
+}
+
+##Generate a heat map for the confusion matrix
+heatmap.2(ConfMatrix, Rowv = FALSE, Colv = FALSE, col=colorRampPalette(c("white","darkorchid1")), 
+          cellnote = ConfMatrix, notecol = "black", trace="none", density.info="none", key=TRUE, 
+          key.xlab = "", main="Normalized confusion matrix", colsep = c(1,2,3,4), rowsep = c(1,2,3,4), 
+          sepcolor = "white", xlab = "Actual classe", ylab = "Predicted classe") 
+```
+
+
+**References:**
+
+^[1]^ [Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13). Stuttgart, Germany: ACM SIGCHI, 2013.](http://groupware.les.inf.puc-rio.br/work.jsf?p1=11201)
+
+^[2]^ [Coursera Practical Machine Learning Assignment page.](https://www.coursera.org/learn/practical-machine-learning/peer/R43St/prediction-assignment-writeup)
+
+
+-----------------------------------------------------
+
+#<font color="darkorchid">Appendix: Results of other models</font>{.tabset}
+Here are the results of all the other models. The code behind each of the models has been suprressed. It essentially uses the same function above to run each model type.
+
+##Basic Tree
+```{r run_rpart, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+fit <- FitModel(pmltraining, "rpart", 1, NumOfRuns=1)
+fit
+PredictedValues <- predict(fit, newdata = pmltraining)
+ConfMatrix <- table(PredictedValues, pmltraining$classe)
+for (i in 1:5) {
+    colsum <- sum(ConfMatrix[,i])
+    for (j in 1:5) ConfMatrix[j,i] <- round(ConfMatrix[j,i]/colsum,2)
+}
+heatmap.2(ConfMatrix, Rowv = FALSE, Colv = FALSE, col=colorRampPalette(c("white","darkorchid1")), 
+          cellnote = ConfMatrix, notecol = "black", trace="none", density.info="none", key=TRUE, 
+          key.xlab = "", main="Normalized confusion matrix", colsep = c(1,2,3,4), rowsep = c(1,2,3,4), 
+          sepcolor = "white", xlab = "Actual classe", ylab = "Predicted classe") 
+```
+
+##Bagged Tree
+```{r run_treebag, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+fit <- FitModel(pmltraining, "treebag", 1, NumOfRuns=1)
+fit
+PredictedValues <- predict(fit, newdata = pmltraining)
+ConfMatrix <- table(PredictedValues, pmltraining$classe)
+for (i in 1:5) {
+    colsum <- sum(ConfMatrix[,i])
+    for (j in 1:5) ConfMatrix[j,i] <- round(ConfMatrix[j,i]/colsum,2)
+}
+heatmap.2(ConfMatrix, Rowv = FALSE, Colv = FALSE, col=colorRampPalette(c("white","darkorchid1")), 
+          cellnote = ConfMatrix, notecol = "black", trace="none", density.info="none", key=TRUE, 
+          key.xlab = "", main="Normalized confusion matrix", colsep = c(1,2,3,4), rowsep = c(1,2,3,4), 
+          sepcolor = "white", xlab = "Actual classe", ylab = "Predicted classe") 
+```
+
+##Stochastic Gradient Boosting
+```{r run_gbm, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+fit <- FitModel(pmltraining, "gbm", 1, NumOfRuns=1, verbose=FALSE)
+fit
+PredictedValues <- predict(fit, newdata = pmltraining)
+ConfMatrix <- table(PredictedValues, pmltraining$classe)
+for (i in 1:5) {
+    colsum <- sum(ConfMatrix[,i])
+    for (j in 1:5) ConfMatrix[j,i] <- round(ConfMatrix[j,i]/colsum,2)
+}
+heatmap.2(ConfMatrix, Rowv = FALSE, Colv = FALSE, col=colorRampPalette(c("white","darkorchid1")), 
+          cellnote = ConfMatrix, notecol = "black", trace="none", density.info="none", key=TRUE, 
+          key.xlab = "", main="Normalized confusion matrix", colsep = c(1,2,3,4), rowsep = c(1,2,3,4), 
+          sepcolor = "white", xlab = "Actual classe", ylab = "Predicted classe") 
+```
+
+##Linear Discriminate Analysis
+```{r run_lda, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+fit <- FitModel(pmltraining, "lda", 1, NumOfRuns=1)
+fit
+PredictedValues <- predict(fit, newdata = pmltraining)
+ConfMatrix <- table(PredictedValues, pmltraining$classe)
+for (i in 1:5) {
+    colsum <- sum(ConfMatrix[,i])
+    for (j in 1:5) ConfMatrix[j,i] <- round(ConfMatrix[j,i]/colsum,2)
+}
+heatmap.2(ConfMatrix, Rowv = FALSE, Colv = FALSE, col=colorRampPalette(c("white","darkorchid1")), 
+          cellnote = ConfMatrix, notecol = "black", trace="none", density.info="none", key=TRUE, 
+          key.xlab = "", main="Normalized confusion matrix", colsep = c(1,2,3,4), rowsep = c(1,2,3,4), 
+          sepcolor = "white", xlab = "Actual classe", ylab = "Predicted classe") 
+```
+
+##Naive Bayes
+```{r run_nb, message=FALSE, warning=FALSE, echo=FALSE, cache=TRUE}
+fit <- FitModel(pmltraining, "nb", 1, NumOfRuns=1)
+fit
+PredictedValues <- predict(fit, newdata = pmltraining)
+ConfMatrix <- table(PredictedValues, pmltraining$classe)
+for (i in 1:5) {
+    colsum <- sum(ConfMatrix[,i])
+    for (j in 1:5) ConfMatrix[j,i] <- round(ConfMatrix[j,i]/colsum,2)
+}
+heatmap.2(ConfMatrix, Rowv = FALSE, Colv = FALSE, col=colorRampPalette(c("white","darkorchid1")), 
+          cellnote = ConfMatrix, notecol = "black", trace="none", density.info="none", key=TRUE, 
+          key.xlab = "", main="Normalized confusion matrix", colsep = c(1,2,3,4), rowsep = c(1,2,3,4), 
+          sepcolor = "white", xlab = "Actual classe", ylab = "Predicted classe") 
+```
